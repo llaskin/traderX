@@ -58,9 +58,41 @@ The project has two content surfaces that may overlap:
 
 **Relative links in docs**: Links like `../account-service` work on GitHub. The Docusaurus remark plugin (`website/src/remark/transformRelativeLinks.js`) converts them to full GitHub URLs at build time. Keep using relative links in `docs/` markdown files.
 
+## Docker image guidelines
+- **Multi-stage builds are the default pattern** for all services. When modifying or creating a Dockerfile, use a separate builder stage and a minimal runtime stage. Do not leave single-stage builds that mix build tooling with the runtime image.
+  - **Java services**: builder stage uses the full JDK image (e.g., `eclipse-temurin:21-jdk-jammy AS builder`) running `./gradlew build --no-daemon`; runtime stage uses a JRE-only image (e.g., `eclipse-temurin:21-jre-jammy`). The final image runs the built JAR directly with `java -jar`.
+  - **Node.js services**: builder stage uses a full Node image (e.g., `node:23 AS builder`) running `npm install --only=production` and `npm run build` (if TypeScript); runtime stage uses Alpine (`alpine:3.21`) with only Node installed via `apk add --no-cache nodejs`.
+- **Copy node_modules from the builder stage** — never re-run `npm install` in the runtime stage. Use `COPY --from=builder /usr/src/app/node_modules ./node_modules`.
+- **Remove `base.Dockerfile` files** when refactoring a service to a multi-stage build — these are dev container scaffolding files that are no longer needed once production builds are self-contained.
+- **`docker-compose.yml` must not contain a top-level `version` field** — Docker Compose V2 does not require it and treats it as deprecated. Remove it if present.
+- **Angular frontend** should use a production Dockerfile (`Dockerfile.prod`) with an nginx-based final stage for serving the built static assets. Update `docker-compose.yml` to reference `dockerfile: Dockerfile.prod`.
+
+## Security and dependency management
+- **Dependency upgrades must be comprehensive** — when upgrading a dependency (e.g., Spring Boot), apply the change in ALL services that use it: `account-service`, `position-service`, `trade-processor`, `trade-service`. Partial upgrades that miss services are treated as failures.
+- **logback-core and logback-classic must always be pinned together** — when pinning or upgrading `logback-core` in a Java service, also explicitly declare `logback-classic` at the same version in the same `build.gradle`. Spring Boot does not automatically pin both.
+- **After upgrading Java dependencies, update `.github/gradle-cve-ignore-list.xml`** — update any jar filename references that embed the old version (e.g., `h2-2.2.224.jar` → `h2-2.3.232.jar`) and add new `<suppress>` blocks for any CVEs introduced by the new versions.
+- **.NET CVE suppressions** go in `.github/dotnet-cve-ignore-list.xml` with a `<notes>` entry explaining the safe usage context.
+- **springdoc-openapi must be kept in sync with Spring Boot** — when upgrading Spring Boot, check whether `org.springdoc:springdoc-openapi-starter-webmvc-ui` in `account-service` and `position-service` also needs a version bump.
+- **socket.io-client in Java services** (`trade-processor`, `trade-service`) is pinned in `build.gradle` at `io.socket:socket.io-client`. When addressing socket.io CVEs, update this version directly rather than relying on transitive resolution.
+- **NestJS v11 requires @nestjs/cli at Docker build time** — when upgrading `reference-data` from NestJS v10 to v11, add `RUN npm install @nestjs/cli` to the Dockerfile after the production install step.
+
+## Kubernetes and service port configuration
+- **Port environment variables in K8s manifests must match containerPort** — when editing `gitops/base/<service>/deployment.yaml`, verify that any `*_PORT` environment variable matches the `containerPort` in the same manifest. Known reference: `reference-data` listens on port `18085` (not `18095`).
+- **GHCR image references**: K8s deployment manifests under `gitops/base/` should use `ghcr.io/finos/traderx/<service>` as the image path when pre-built images are available.
+
+## Docusaurus remark plugin (transformRelativeLinks)
+The plugin at `website/src/remark/transformRelativeLinks.js` rewrites relative links in `docs/` markdown to absolute GitHub URLs. When modifying or implementing this plugin:
+- **Only rewrite single-level `../` links** — links starting with `../../` (or deeper) must be left untouched. Guard: `if (!url || !url.startsWith('../') || url.startsWith('../../')) return;`
+- **Skip `.md` and `.mdx` cross-links** — Docusaurus handles internal doc navigation itself.
+- **Preserve hash fragments and query strings** — split the URL on `#` and `?`, rewrite the path portion, then re-append both.
+- **Use `/blob/` for files, `/tree/` for directories** based on whether the path has a known file extension.
+- **Register the plugin** in `docusaurus.config.js` under the docs preset's `remarkPlugins` array, passing `repoUrl` and `branch` as options.
+
 ## Useful files by task
 - Architecture/flows: `docs/overview.md`, `docs/flows.md`, `docs/c4/workspace.dsl`
 - Local run and ports: `docs/running.md`
 - Docker/K8s: `docker-compose.yml`, `gitops/local/Tiltfile`
 - Front-end: `web-front-end/angular/README.md`, `web-front-end/react/README.md`
 - Docs site: `website/README.md`, `docs/`
+- CVE ignore lists: `.github/gradle-cve-ignore-list.xml`, `.github/dotnet-cve-ignore-list.xml`
+- Security workflow: `.github/workflows/security.yml`
